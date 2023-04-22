@@ -7,6 +7,7 @@ import colorsys
 
 POLYFACTOR = 1.5 # Small lines are detected as shapes.
 CCOLOUR = 0 # Should be a form controlled thing.
+COLREG = None # Computer colour regions. Array. Extended whenever a new colour is requested. 
 IDIM = 256
 CBLACK = 255
 
@@ -19,16 +20,34 @@ def generate_unique_colors(n):
     rgb_colors = [tuple(int(i * 255) for i in colorsys.hsv_to_rgb(*hsv)) for hsv in hsv_colors]
     return rgb_colors
 
-def deterministic_colours(n):
+def deterministic_colours(n, lcol = None):
     """Generate n visually distinct & consistent colours as a list of RGB tuples.
     
     Uses the hue of hsv, with balanced saturation & value.
     Goes around the cyclical 0-256 and picks each /2 value for every round.
+    Continuation rules: If pcyv != ccyv in next round, then we don't care.
+    If pcyv == ccyv, we want to get the cval + delta of last elem.
+    If lcol > n, will return it as is.
     """
+    if n <= 0:
+        return None
     pcyc = -1
     cval = 0
+    if lcol is None:
+        st = 0
+    elif n <= len(lcol):
+        # return lcol[:n] # Truncating the list is accurate, but pointless.
+        return lcol
+    else:
+        st = len(lcol)
+        if st > 0:
+            pcyc = np.ceil(np.log2(st))
+            # This is erroneous on st=2^n, but we don't care.
+            dlt = 1 / (2 ** pcyc)
+            cval = dlt + 2 * dlt * (st % (2 ** (pcyc - 1)) - 1)
+
     lhsv = []
-    for i in range(n):
+    for i in range(st,n):
         ccyc = np.ceil(np.log2(i + 1))
         if ccyc == 0: # First col = 0.
             cval = 0
@@ -43,10 +62,14 @@ def deterministic_colours(n):
     lhsv = [(v, 0.5, 0.5) for v in lhsv] # Hsv conversion only works 0:1.
     lrgb = [colorsys.hsv_to_rgb(*hsv) for hsv in lhsv]
     lrgb = (np.array(lrgb) * (CBLACK + 1)).astype(np.uint8) # Convert to colour uints.
+    lrgb = lrgb.reshape(-1, 3)
+    if lcol is not None:
+        lrgb = np.concatenate([lcol, lrgb])
     return lrgb
 
 def detect_polygons(img,out,num):
     global CCOLOUR
+    global COLREG
     
     # Convert the binary image to grayscale
     if img is None:
@@ -64,7 +87,9 @@ def detect_polygons(img,out,num):
     # color = np.random.randint(0,255,3)
     # color = deterministic_colours(CCOLOUR + 1)[-1]
     # CCOLOUR = CCOLOUR +1
-    color = deterministic_colours(int(num) + 1)[-1]
+
+    COLREG = deterministic_colours(int(num) + 1, COLREG)
+    color = COLREG[int(num),:]
     # Loop through each contour and detect polygons
     for cnt in contours:
         # Approximate the contour to a polygon
@@ -89,7 +114,7 @@ def detect_polygons(img,out,num):
     # Convert the grayscale image back to RGB
     #img2 = cv2.cvtColor(img2, cv2.COLOR_GRAY2RGB) # Converting to grayscale is dumb.
     
-    return None, img2, num + 1
+    return None, img2, num + 1 if num + 1 <= CBLACK else num
 
 def detect_mask(img,num):
     color = deterministic_colours(int(num) + 1)[-1]
@@ -108,12 +133,13 @@ with gr.Blocks() as demo:
         with gr.Column():
             sketch = gr.Image(shape=(IDIM, IDIM),source = "canvas", tool = "color-sketch")#,brush_radius = 1) # No brush radius in 16.2.
             # sketch = gr.Image(shape=(256, 256),source = "upload", tool = "color-sketch")
-            num = gr.Number(value = 0)
+            #num = gr.Number(value = 0)
+            num = gr.Slider(label="Region", minimum=0, maximum=CBLACK, step=1, value=0)
             btn = gr.Button(value = "Draw region")
             btn2 = gr.Button(value = "Display mask")
         with gr.Column():
             # Cannot update sketch in 16.2, must add to different image.
-            output = gr.Image(shape=(IDIM, IDIM))
+            output = gr.Image(shape=(IDIM, IDIM), source = "upload")
             output2 = gr.Image(shape=(IDIM, IDIM))
     
     btn.click(detect_polygons, inputs = [sketch,output,num], outputs = [sketch,output,num])

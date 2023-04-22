@@ -15,3 +15,5 @@ Known issues / plans:
 - Bug when checking closed contours - I can't figure out how to exclude part of the contours which is outside (for example, line shaped like "e" keeps the tail).
 - Make colour gen function build on an existing list to prevent redundant calculation. And also to enable custom mask colours.
 - Refactor the hell outta everything.
+
+![RegionalPolygon1](https://user-images.githubusercontent.com/41131377/233788858-06bc4930-15e4-486a-87d6-6a8a8ae46038.png)

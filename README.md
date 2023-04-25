@@ -7,7 +7,7 @@
 - Showcase mask selection.
 
 Known issues / plans:
-- Gradio won't update a sketch except emptying it when set to null (as I did). Originally the plan was for the user to receive feedback on the same image, where polygon detection is filtered to black lines only. It might've been fixed in gradio 3.23, or I'm using it wrong, I dunno.
+- ~~Gradio won't update a sketch except emptying it when set to null (as I did). Originally the plan was for the user to receive feedback on the same image, where polygon detection is filtered to black lines only. It might've been fixed in gradio 3.23, or I'm using it wrong, I dunno.~~ Found a workaround - if the sketch's shape changes then it will refresh. Added a variant factor, and now everything is in a single sketchboard. Didn't even have to do much, using cnet's technique of image + mask, since gradio separates these to a dict. Huzzah.
 - Currently limited to 256 regions, which is more than enough. Adding more is simple enough technically, but won't look as distinct.
 - ~~The number interface is meh, a slider would be better.~~ Done.
 - Setting brush size to minimum doesn't work, likely due to version.

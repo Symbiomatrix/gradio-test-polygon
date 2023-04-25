@@ -10,6 +10,11 @@ CCOLOUR = 0 # Should be a form controlled thing.
 COLREG = None # Computer colour regions. Array. Extended whenever a new colour is requested. 
 IDIM = 256
 CBLACK = 255
+VARIANT = 0 # Ensures that the sketch canvas is actually refreshed.
+
+# BREAKTHROUGH:
+# Sketch can be overridden via controlnet method of creation, an np array with type,
+# when varying the shape a bit.
 
 def generate_unique_colors(n):
     """Generate n visually distinct colors as a list of RGB tuples.
@@ -17,7 +22,7 @@ def generate_unique_colors(n):
     Uses the hue of hsv, with balanced saturation & value.
     """
     hsv_colors = [(x*1.0/n, 0.5, 0.5) for x in range(n)]
-    rgb_colors = [tuple(int(i * 255) for i in colorsys.hsv_to_rgb(*hsv)) for hsv in hsv_colors]
+    rgb_colors = [tuple(int(i * CBLACK) for i in colorsys.hsv_to_rgb(*hsv)) for hsv in hsv_colors]
     return rgb_colors
 
 def deterministic_colours(n, lcol = None):
@@ -67,20 +72,29 @@ def deterministic_colours(n, lcol = None):
         lrgb = np.concatenate([lcol, lrgb])
     return lrgb
 
-def detect_polygons(img,out,num):
+def detect_polygons(img,num):
     global CCOLOUR
     global COLREG
+    global VARIANT
+    
+    # I dunno why, but mask has a 4th colour channel, which contains nothing. Alpha?
+    if VARIANT != 0:
+        out = img["image"][:-VARIANT,:-VARIANT,:3]
+        img = img["mask"][:-VARIANT,:-VARIANT,:3]
+    else:
+        out = img["image"][:,:,:3]
+        img = img["mask"][:,:,:3]
     
     # Convert the binary image to grayscale
     if img is None:
         img = np.zeros([IDIM,IDIM,3],dtype = np.uint8) + CBLACK # Stupid cv.
     if out is None:
-        out = np.zeros([IDIM,IDIM,3],dtype = np.uint8) + CBLACK # Stupid cv.
+        out = np.zeros_like(img) + CBLACK # Stupid cv.
     bimg = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     
     # Find contours in the image
     # Must reverse colours, otherwise draws an outer box (0->255). Dunno why gradio uses 255 for white anyway. 
-    contours, hierarchy = cv2.findContours(255 - bimg, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(bimg, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     #img2 = np.zeros_like(img) + 255 # Fresh image.
     img2 = out # Update current image.
@@ -114,13 +128,29 @@ def detect_polygons(img,out,num):
     # Convert the grayscale image back to RGB
     #img2 = cv2.cvtColor(img2, cv2.COLOR_GRAY2RGB) # Converting to grayscale is dumb.
     
-    return None, img2, num + 1 if num + 1 <= CBLACK else num
+    skimg = create_canvas(img2.shape[0], img2.shape[1])
+    if VARIANT != 0:
+        skimg[:-VARIANT,:-VARIANT,:] = img2
+    else:
+        skimg[:,:,:] = img2
+    
+    return skimg, num + 1 if num + 1 <= CBLACK else num
 
 def detect_mask(img,num):
     color = deterministic_colours(int(num) + 1)[-1]
     color = color.reshape([1,1,3])
-    mask = ((img == color).all(-1)) * CBLACK
+    mask = ((img["image"] == color).all(-1)) * CBLACK
     return mask
+
+def create_canvas(h, w):
+    """New canvas area.
+    
+    Small variant value is added (and ignored later) due to gradio refresh bug.
+    """
+    global VARIANT
+    VARIANT = 1 - VARIANT
+    vret =  np.zeros(shape=(h + VARIANT, w + VARIANT, 3), dtype=np.uint8) + CBLACK
+    return vret
 
 # Define the Gradio interface
 
@@ -131,19 +161,26 @@ def detect_mask(img,num):
 with gr.Blocks() as demo:
     with gr.Row():
         with gr.Column():
-            sketch = gr.Image(shape=(IDIM, IDIM),source = "canvas", tool = "color-sketch")#,brush_radius = 1) # No brush radius in 16.2.
+            # Gradio shape is dumb.
+            # sketch = gr.Image(shape=(IDIM, IDIM),source = "canvas", tool = "color-sketch")#,brush_radius = 1) # No brush radius in 16.2.
+            sketch = gr.Image(source = "upload", mirror_webcam = False, type = "numpy", tool = "sketch")
             # sketch = gr.Image(shape=(256, 256),source = "upload", tool = "color-sketch")
             #num = gr.Number(value = 0)
             num = gr.Slider(label="Region", minimum=0, maximum=CBLACK, step=1, value=0)
             btn = gr.Button(value = "Draw region")
             btn2 = gr.Button(value = "Display mask")
+            canvas_width = gr.Slider(label="Canvas Width", minimum=64, maximum=2048, value=512, step=8)
+            canvas_height = gr.Slider(label="Canvas Height", minimum=64, maximum=2048, value=512, step=8)
+            cbtn = gr.Button(value="Create mask area")
         with gr.Column():
             # Cannot update sketch in 16.2, must add to different image.
-            output = gr.Image(shape=(IDIM, IDIM), source = "upload")
+            # output = gr.Image(shape=(IDIM, IDIM), source = "upload")
+            # output = gr.Image(source = "upload")
             output2 = gr.Image(shape=(IDIM, IDIM))
     
-    btn.click(detect_polygons, inputs = [sketch,output,num], outputs = [sketch,output,num])
-    btn2.click(detect_mask, inputs = [output,num], outputs = [output2])
+    btn.click(detect_polygons, inputs = [sketch,num], outputs = [sketch,num])
+    btn2.click(detect_mask, inputs = [sketch,num], outputs = [output2])
+    cbtn.click(fn=create_canvas, inputs=[canvas_height, canvas_width], outputs=[sketch])
 
 if __name__ == "__main__":
     demo.launch()

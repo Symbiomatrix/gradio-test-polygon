@@ -4,17 +4,30 @@ import cv2
 import numpy as np
 import gradio as gr
 import colorsys
+import os
+# from PIL import Image
 
 POLYFACTOR = 1.5 # Small lines are detected as shapes.
 CCOLOUR = 0 # Should be a form controlled thing.
-COLREG = None # Computer colour regions. Array. Extended whenever a new colour is requested. 
+COLREG = None # Computed colour regions cache. Array. Extended whenever a new colour is requested. 
+COLUSE = set() # Used colours. Reset on new canvas / upload.
 IDIM = 256
 CBLACK = 255
+MAXCOL = 360 - 1 # Hsv goes by degrees.
 VARIANT = 0 # Ensures that the sketch canvas is actually refreshed.
+HSV_RANGE = (125,130) # Permitted hsv error range. Mind, wrong hue might throw off the mask entirely.
+HSV_VAL = 128
+FEXT = ".png"
 
 # BREAKTHROUGH:
 # Sketch can be overridden via controlnet method of creation, an np array with type,
 # when varying the shape a bit.
+
+def get_colours(img):
+    """List colours used in image (as nxc array).
+    
+    """
+    return np.unique(img.reshape(-1, img.shape[-1]), axis=0)
 
 def generate_unique_colors(n):
     """Generate n visually distinct colors as a list of RGB tuples.
@@ -72,10 +85,60 @@ def deterministic_colours(n, lcol = None):
         lrgb = np.concatenate([lcol, lrgb])
     return lrgb
 
+def detect_image_colours(img):
+    """Detect relevant hsv colours in image and clean up the mask.
+    
+    BUG: Rgb->hsb and back is not lossless in np / cv. Getting 128->127.
+    Looks like the only option is to use colorsys which is contiguous.
+    It's ~x10 slower but the conversion is only on load.
+    """
+    global COLUSE
+    (h,w,c) = img.shape
+    # Convert to hsv. CONT: Not actually sure if it's correct. Should test.
+    hsv_img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    # Flatten the image hw and find unique colours.
+    lucols = get_colours(hsv_img)
+    # Filter colours to the ones we detect only.
+    # Allows some leeway with mask deterioration.
+    msk = ((lucols[:,1] >= HSV_RANGE[0]) & (lucols[:,1] <= HSV_RANGE[1]) &
+           (lucols[:,2] >= HSV_RANGE[0]) & (lucols[:,2] <= HSV_RANGE[1])) 
+    lfltcols = lucols[msk]
+    # If there are invalid colours (besides bg white), warn that they'll be removed.
+    if len(lfltcols) < len(lucols) - 1:
+        print("Warning: Invalid colours detected in mask, will be removed.")
+    # Find regions which contain the right colours.
+    msk2 = np.isin(hsv_img.reshape(-1,c),lfltcols).reshape(h,w,c).all(axis = 2)
+    hsv_img[msk2,1:] = HSV_VAL # Make all relevant colours precise values.
+    hsv_img[~msk2] = [0,0,CBLACK] # CONT Empty all irrelevant colours.
+    # Save the colours used in mask, return img to rgb.
+    # First convert to exact vals + hashable tuples, and update in a new set.
+    lfltcols[:,1:] = HSV_VAL
+    lfltcols2 = [tuple(x) for x in lfltcols] # tolist
+    COLUSE = set()
+    COLUSE.update(lfltcols2)
+    skimg = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2RGB)
+    
+    return skimg
+
+def save_mask(img, flpt, flnm):
+    """Save mask to file.
+    
+    These will be loaded as part of a preset.
+    Cv's colour scheme is an annoyance, but avoiding yet another import. 
+    """
+    # Cv's colour scheme is annoying.
+    try:
+        img = img["image"]
+    except Exception:
+        pass
+    img = cv2.cvtColor(img,cv2.COLOR_BGR2RGBA)
+    cv2.imwrite(os.path.join(os.getcwd(),flpt,flnm + FEXT), img)
+
 def detect_polygons(img,num):
     global CCOLOUR
     global COLREG
     global VARIANT
+    global COLUSE
     
     # I dunno why, but mask has a 4th colour channel, which contains nothing. Alpha?
     if VARIANT != 0:
@@ -104,6 +167,7 @@ def detect_polygons(img,num):
 
     COLREG = deterministic_colours(int(num) + 1, COLREG)
     color = COLREG[int(num),:]
+    COLUSE.add(tuple(color))
     # Loop through each contour and detect polygons
     for cnt in contours:
         # Approximate the contour to a polygon
@@ -148,6 +212,8 @@ def create_canvas(h, w):
     Small variant value is added (and ignored later) due to gradio refresh bug.
     """
     global VARIANT
+    global COLUSE
+    COLUSE = set()
     VARIANT = 1 - VARIANT
     vret =  np.zeros(shape=(h + VARIANT, w + VARIANT, 3), dtype=np.uint8) + CBLACK
     return vret
@@ -166,12 +232,17 @@ with gr.Blocks() as demo:
             sketch = gr.Image(source = "upload", mirror_webcam = False, type = "numpy", tool = "sketch")
             # sketch = gr.Image(shape=(256, 256),source = "upload", tool = "color-sketch")
             #num = gr.Number(value = 0)
-            num = gr.Slider(label="Region", minimum=0, maximum=CBLACK, step=1, value=0)
+            num = gr.Slider(label="Region", minimum=0, maximum=MAXCOL, step=1, value=0)
             btn = gr.Button(value = "Draw region")
             btn2 = gr.Button(value = "Display mask")
             canvas_width = gr.Slider(label="Canvas Width", minimum=64, maximum=2048, value=512, step=8)
             canvas_height = gr.Slider(label="Canvas Height", minimum=64, maximum=2048, value=512, step=8)
             cbtn = gr.Button(value="Create mask area")
+            # CONT: Awaiting fix for https://github.com/gradio-app/gradio/issues/4088.
+            # Upload button kinda sucks. Just gonna make a second image.
+            # mskbtn = gr.UploadButton("Upload mask cus gradio", file_types=["image"])
+            uploadme = gr.Image(label="Upload mask here cus gradio",source = "upload", type = "numpy")
+            dlbtn = gr.Button(value="Download mask")
         with gr.Column():
             # Cannot update sketch in 16.2, must add to different image.
             # output = gr.Image(shape=(IDIM, IDIM), source = "upload")
@@ -181,6 +252,9 @@ with gr.Blocks() as demo:
     btn.click(detect_polygons, inputs = [sketch,num], outputs = [sketch,num])
     btn2.click(detect_mask, inputs = [sketch,num], outputs = [output2])
     cbtn.click(fn=create_canvas, inputs=[canvas_height, canvas_width], outputs=[sketch])
+    #sketch.upload(fn = detect_image_colours, inputs = [sketch], outputs = [sketch]) # Unusable until #4088 fixed.
+    uploadme.upload(fn = detect_image_colours, inputs = [uploadme], outputs = [sketch])
+    dlbtn.click(fn = lambda x: save_mask(x,r"test","tpreset"), inputs = [sketch],outputs = [])
 
 if __name__ == "__main__":
     demo.launch()

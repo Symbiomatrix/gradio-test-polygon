@@ -113,42 +113,50 @@ def detect_image_colours(img):
     global VARIANT
     VARIANT = 0 # Upload doesn't need variance, it refreshes automatically.
     (h,w,c) = img.shape
-    # Convert to hsv.
+    # Get raw colours, convert them to hsv, update sv to precise range and remove unrecognised,
+    # back to rgb, and then map each colour via mask.
+    # Cv's rgb<->hsv is lossy, and colorsys map is x10 as slow,
+    #  so this is the least terrible option.
+    # It might be possible to use cv2 one way for the filter, but I think that's risky.
     # hsv_img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
-    hsv_img = np.apply_along_axis(lambda x: colorsys.rgb_to_hsv(*x), axis=-1, arr=img/255.0)
-    # Flatten the image hw and find unique colours.
-    lucols = get_colours(hsv_img)
-    # Filter colours to the ones we detect only.
-    # Allows some leeway with mask deterioration.
-    msk = ((lucols[:,1] >= HSV_RANGE[0]) & (lucols[:,1] <= HSV_RANGE[1]) &
-           (lucols[:,2] >= HSV_RANGE[0]) & (lucols[:,2] <= HSV_RANGE[1])) 
-    lfltcols = lucols[msk]
-    # If there are invalid colours (besides bg white), warn that they'll be removed.
-    if len(lfltcols) < len(lucols) - 1:
-        print("Warning: Invalid colours detected in mask, will be removed.")
-    # Find regions which contain the right colours.
-    msk2 = np.isin(hsv_img.reshape(-1,c),lfltcols).reshape(h,w,c).all(axis = 2)
-    hsv_img[msk2,1:] = HSV_VAL # Make all relevant colours precise values.
-    hsv_img[~msk2] = [0,0,0.999] # Empty all irrelevant colours. Must reach <256.
-    # hsv_img[~msk2] = [0,0,CBLACK] # For cv version.
-    
-    # Save the colours used in mask, return img to rgb.
-    # First convert to exact vals + hashable tuples, and update in a new set.
     # skimg = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2RGB)
-    skimg = np.apply_along_axis(lambda x: colorsys.hsv_to_rgb(*x), axis=-1, arr=hsv_img)
-    skimg = (skimg * (CBLACK + 1)).astype(np.uint8)
-    lfltcols = get_colours(skimg)
+    lrgb = get_colours(img)
+    lhsv = np.apply_along_axis(lambda x: colorsys.rgb_to_hsv(*x), axis=-1, arr = lrgb / CBLACK)
+    msk = ((lhsv[:,1] >= HSV_RANGE[0]) & (lhsv[:,1] <= HSV_RANGE[1]) &
+           (lhsv[:,2] >= HSV_RANGE[0]) & (lhsv[:,2] <= HSV_RANGE[1]))
+    lfltrgb = lrgb[msk] 
+    lflthsv = lhsv[msk]
+    lflthsv[:,1:] = HSV_VAL
+    lfltfix = np.apply_along_axis(lambda x: colorsys.hsv_to_rgb(*x), axis=-1, arr=lflthsv)
+    lfltfix = (lfltfix * (CBLACK + 1)).astype(np.uint8)
+    # I tried to use isin, but it seems to detect any permutation.
+    # It's better to roll colour channel to the front, add extra fake dims,
+    # then use direct comparison.
+    # Shape: colour x search x img
+    cnt = len(lfltrgb)
+    img2 = img.reshape(-1,c,1)
+    img2 = np.moveaxis(img2,0,-1)
+    lfltrgb2 = np.moveaxis(lfltrgb,-1,0)
+    lfltrgb2 = lfltrgb2.reshape(c,-1,1)
+    msk2 = (img2 == lfltrgb2).all(axis = 0).reshape(cnt,h,w)
+    for i,_ in enumerate(lfltrgb):
+        img[msk2[i]] = lfltfix[i]
+    # Empty all nonfiltered regions.
+    msk3 = ~(msk2.any(axis = 0))
+    img[msk3] = COLWHITE
+    # Save the final colours used in mask.
+    # lfltcols = get_colours(img)
     # lfltcols[:,1:] = HSV_VAL
     # Gen all colours, match with those in image.
     # I can think of no mathematical function to inverse the colour gen function.
     # Also, imperfect hash, so ~60 colours go over the edge. Should have 100% matches at x2. 
     COLREG = deterministic_colours(2 * MAXCOL, COLREG)
     cow = index_rows(COLREG)
-    regrows = [cow[(COLREG == f).all(axis = 1)] for f in lfltcols]
+    regrows = [cow[(COLREG == f).all(axis = 1)] for f in lfltfix]
     COLUSE = {reg[0,0]:reg[0,1:].tolist() for reg in regrows if len(reg) > 0}
     # COLUSE.discard(COLWHITE)
     
-    return skimg, None # Clears the upload area. A bit cleaner.
+    return img, None # Clears the upload area. A bit cleaner.
 
 def save_mask(img, flpt, flnm):
     """Save mask to file.
@@ -163,7 +171,7 @@ def save_mask(img, flpt, flnm):
         pass
     if VARIANT != 0: # Always save without variance.
         img = img[:-VARIANT,:-VARIANT,:]
-    img = cv2.cvtColor(img,cv2.COLOR_BGR2RGBA)
+    img = cv2.cvtColor(img,cv2.COLOR_RGB2BGR)
     cv2.imwrite(os.path.join(os.getcwd(),flpt,flnm + FEXT), img)
 
 def detect_polygons(img,num):
